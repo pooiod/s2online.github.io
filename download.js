@@ -1,6 +1,7 @@
 var maxWidth = 0;
 var jszip = null;
 var id = null;
+var sourceZip = null;
 
 function logMessage(msg){
     $("#log").text(msg+"\n"+$("#log").text());
@@ -37,39 +38,172 @@ function perror(err){
 }
 
 async function startDownload(projectId) {
-    $("#log").text("");
     $("#progress").removeClass("error success");
     $("#progress").css("opacity", 1);
-    
-    logMessage("Initializing download for ID: " + projectId);
+    document.getElementById("loadholder").classList.remove("pulse");
+
+    logMessage("Initializing download for project: " + projectId);
     setProgress(5);
 
     try {
-        logMessage("Fetching project token...");
-        const metaResponse = await fetch(`https://trampoline.turbowarp.org/api/projects/${projectId}`);
-        if (!metaResponse.ok) {
-            if (metaResponse.status === 404) throw new Error("Project not found.");
-            throw new Error("Failed to fetch project token.");
-        }
-        const metaData = await metaResponse.json();
-        const token = metaData.project_token;
+        let projectData = null;
 
-        logMessage("Downloading project JSON...");
-        const projectResponse = await fetch(`https://projects.scratch.mit.edu/${projectId}?token=${token}`);
-        if (!projectResponse.ok) throw new Error("Failed to download project JSON.");
-        
-        const projectData = await projectResponse.json();
-        
-        const isSB3 = projectData.targets && Array.isArray(projectData.targets);
+        const isDirectSource = projectId && (typeof projectId === 'string' || projectId instanceof String) && (projectId.startsWith('http') || projectId.startsWith('data:'));
+
+        if (isDirectSource) {
+            logMessage('Downloading project...');
+            setProgress(10);
+
+            window.DownloadedTitle = projectId.split('/').pop().split('.').slice(0, -1).join('.') || 'project';
+
+            const resp = await fetch(projectId);
+            if (!resp.ok) throw new Error('Failed to download project from URL.');
+            var blob = await resp.blob();
+
+            let parsed = false;
+            try {
+                const arrayBufferToBinaryString = (ab) => {
+                    const bytes = new Uint8Array(ab);
+                    const CHUNK = 0x8000;
+                    let str = '';
+                    for (let i = 0; i < bytes.length; i += CHUNK) {
+                        str += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+                    }
+                    return str;
+                };
+
+                const getProjectTextFromZip = async (zipInstance) => {
+                    if (zipInstance && typeof zipInstance.file === 'function') {
+                        let entry = zipInstance.file('project.json');
+                        if (!entry) {
+                            if (zipInstance.files) {
+                                for (const name in zipInstance.files) {
+                                    if (name.toLowerCase().endsWith('project.json')) { entry = zipInstance.file(name); break; }
+                                }
+                            }
+                        }
+                        if (entry) {
+                            if (typeof entry.async === 'function') return await entry.async('string');
+                            if (typeof entry.asText === 'function') return entry.asText();
+                            if (entry._data) {
+                                if (entry._data instanceof Uint8Array) return new TextDecoder().decode(entry._data);
+                                if (typeof entry._data === 'string') return entry._data;
+                            }
+                        }
+                    }
+
+                    if (zipInstance && zipInstance.files) {
+                        for (const name in zipInstance.files) {
+                            if (name.toLowerCase().endsWith('project.json')) {
+                                const f = zipInstance.files[name];
+                                if (!f) continue;
+                                if (typeof f.async === 'function') return await f.async('string');
+                                if (typeof f.asText === 'function') return f.asText();
+                                if (f._data) {
+                                    if (f._data instanceof Uint8Array) return new TextDecoder().decode(f._data);
+                                    if (typeof f._data === 'string') return f._data;
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                };
+
+                let zip = null;
+                try {
+                    if (JSZip && typeof JSZip.loadAsync === 'function') {
+                        zip = await JSZip.loadAsync(blob);
+                    } else {
+                        const z = new JSZip();
+                        const ab = await blob.arrayBuffer();
+                        if (typeof z.loadAsync === 'function') {
+                            zip = await z.loadAsync(ab);
+                        } else if (typeof z.load === 'function') {
+                            const bin = arrayBufferToBinaryString(ab);
+                            z.load(bin);
+                            zip = z;
+                        } else if (typeof JSZip.load === 'function') {
+                            const bin = arrayBufferToBinaryString(ab);
+                            zip = JSZip.load(bin);
+                        } else {
+                            throw new Error('Unsupported JSZip API');
+                        }
+                    }
+                } catch (e) {
+                    throw e;
+                }
+
+                sourceZip = zip;
+
+                const projText = await getProjectTextFromZip(zip);
+                if (projText) {
+                    projectData = JSON.parse(projText);
+                    parsed = true;
+                }
+            } catch (err) {
+                perror(err);
+            }
+
+            if (!parsed) {
+                const text = await blob.text();
+                try {
+                    projectData = JSON.parse(text);
+                    parsed = true;
+                } catch (e) {
+                    throw new Error('Downloaded file is not a valid project JSON or SB archive.');
+                }
+            }
+
+            if (isDirectSource) {
+                const isSB3 = projectData && projectData.targets && Array.isArray(projectData.targets);
+                if (!isSB3) {
+                    const blobToBase64 = (b) => new Promise((res, rej) => {
+                        const reader = new FileReader();
+                        reader.onerror = () => rej(new Error('Failed to read blob as base64'));
+                        reader.onload = () => {
+                            const dataUrl = reader.result.split(',')[1];
+                            res(dataUrl);
+                        };
+                        reader.readAsDataURL(b);
+                    });
+                    const base64 = await blobToBase64(blob);
+                    if (window.gotZipBase64) {
+                        window.gotZipBase64(base64);
+                        psuccess();
+                        return;
+                    } else {
+                        throw new Error('window.gotZipBase64 not found.');
+                    }
+                }
+            }
+
+        } else {
+            logMessage('Fetching project token...');
+            const metaResponse = await fetch(`https://trampoline.turbowarp.org/api/projects/${projectId}`);
+            if (!metaResponse.ok) {
+                if (metaResponse.status === 404) throw new Error('Project not found.');
+                throw new Error('Failed to fetch project token.');
+            }
+            const metaData = await metaResponse.json();
+            const token = metaData.project_token;
+            window.DownloadedTitle = metaData.title;
+
+            logMessage('Downloading project JSON...');
+            const projectResponse = await fetch(`https://projects.scratch.mit.edu/${projectId}?token=${token}`);
+            if (!projectResponse.ok) throw new Error('Failed to download project JSON.');
+            projectData = await projectResponse.json();
+        }
+
+        const isSB3 = projectData && projectData.targets && Array.isArray(projectData.targets);
 
         jszip = new JSZip();
-        jszip.comment = "Converted/Downloaded with JS Scratch Converter";
+        jszip.comment = "Converted sb3 to sb2 by pooiod7's converter (scratchflash.pages.dev/download)";
 
         if (isSB3) {
-            logMessage("Detected Scratch 3.0 project. Starting conversion...");
+            logMessage('Detected Scratch 3.0 project. Starting conversion...');
             await processSB3(projectData);
         } else {
-            logMessage("Detected Legacy (SB2) project.");
+            logMessage('Detected Legacy (SB2) project.');
             await processLegacy(projectData);
         }
 
@@ -78,11 +212,12 @@ async function startDownload(projectId) {
     }
 }
 
+// Based on https://github.com/RexScratch/sb3tosb2
 async function processSB3(projectData) {
     const converter = new ProjectConverter();
 
     // CONVERTION SETTINGS
-    converter.compat = false;
+    converter.compat = true;
     converter.unlimJoin = false;
     converter.limList = false;
     converter.penFill = false;
@@ -127,11 +262,11 @@ async function processSB3(projectData) {
     stage.info.spriteCount = sprites.length;
     stage.info.scriptCount = sprites.reduce((acc, s) => acc + s.scripts.length, 0) + stage.scripts.length;
 
-    if (converter.timerCompat) {
-        const gfResetTimer = [0, 0, [['whenGreenFlag'], ['doIf', ['>', ['-', ['*', 86400, ['-', ['timestamp'], ['readVariable', 'reset time']]], ['timer']], '0.1'], [['setVar:to:', 'reset time', ['-', ['timestamp'], ['/', ['timer'], 86400]]]]]]];
-        stage.scripts.push(gfResetTimer);
-        sprites.forEach(s => s.scripts.push(gfResetTimer));
-    }
+    // if (converter.timerCompat) {
+    //     const gfResetTimer = [0, 0, [['whenGreenFlag'], ['doIf', ['>', ['-', ['*', 86400, ['-', ['timestamp'], ['readVariable', 'reset time']]], ['timer']], '0.1'], [['setVar:to:', 'reset time', ['-', ['timestamp'], ['/', ['timer'], 86400]]]]]]];
+    //     stage.scripts.push(gfResetTimer);
+    //     sprites.forEach(s => s.scripts.push(gfResetTimer));
+    // }
 
     jszip.file("project.json", JSON.stringify(stage));
 
@@ -298,7 +433,14 @@ class BlockArgMapper {
         }
         return ['goBackByLayers:', layers];
     }
-    looks_costumenumbername(b, bs) { return this.c.fieldVal('NUMBER_NAME', b) === 'number' ? ['costumeIndex'] : ['costumeName']; }
+    looks_costumenumbername(b, bs) {
+        const numName = this.c.fieldVal('NUMBER_NAME', b);
+        if (numName === 'number') return ['costumeIndex'];
+        if (this.c.compat && !this.c.targetIsStage) {
+            return ['getLine:ofList:', ['costumeIndex'], this.c.varName('SpriteCostumes')];
+        }
+        return ['costumeName'];
+    }
     looks_backdropnumbername(b, bs) { return this.c.fieldVal('NUMBER_NAME', b) === 'number' ? ['backgroundIndex'] : ['sceneName']; }
     looks_size(b, bs) { return ['scale']; }
     // Sound
@@ -347,11 +489,11 @@ class BlockArgMapper {
     sensing_mousey(b, bs) { return ['mouseY']; }
     sensing_loudness(b, bs) { return ['soundLevel']; }
     sensing_timer(b, bs) { 
-        if(this.c.compat) { this.c.timerCompat = true; return ['*', 86400, ['-', ['timestamp'], ['readVariable', 'reset time']]]; }
+        // if(this.c.compat) { this.c.timerCompat = true; return ['*', 86400, ['-', ['timestamp'], ['readVariable', 'reset time']]]; }
         return ['timer']; 
     }
     sensing_resettimer(b, bs) {
-        if(this.c.compat) { this.c.resetTimer = true; this.c.timerCompat = true; return ['call', 'reset timer']; }
+        // if(this.c.compat) { this.c.resetTimer = true; this.c.timerCompat = true; return ['call', 'reset timer']; }
         return ['timerReset'];
     }
     sensing_of(b, bs) {
@@ -440,15 +582,15 @@ class BlockArgMapper {
     pen_stamp(b, bs) { return ['stampCostume']; }
     pen_penDown(b, bs) { 
         if(this.c.compat) { this.c.penUpDown = true; return ['call', 'pen down']; }
-        return ['putPenDown']; 
+        return ['putPenDown'];
     }
     pen_penUp(b, bs) { 
         if(this.c.compat) { this.c.penUpDown = true; return ['call', 'pen up']; }
-        return ['putPenUp']; 
+        return ['putPenUp'];
     }
     pen_setPenColorToColor(b, bs) {
         let val = this.c.inputVal('COLOR', b, bs);
-        if(this.c.compat) { this.c.penColor = true; return ['call', 'set pen color to %c', val]; }
+        // if(this.c.compat) { this.c.penColor = true; return ['call', 'set pen color to %c', val]; }
         return ['penColor:', val];
     }
     pen_changePenSizeBy(b, bs) { return ['changePenSizeBy:', this.c.inputVal('SIZE', b, bs)]; }
@@ -480,6 +622,16 @@ class ProjectConverter {
         this.addList = false;
         this.insertList = false;
         this.targetIsStage = false;
+
+        this._fontFiles = {
+            'Noto Sans': 'https://raw.githubusercontent.com/towerofnix/scratch-render-fonts/refs/heads/master/src/NotoSans-Medium.ttf',
+            'Source Serif Pro': 'https://raw.githubusercontent.com/towerofnix/scratch-render-fonts/refs/heads/master/src/SourceSerifPro-Regular.otf',
+            'Handlee': 'https://raw.githubusercontent.com/towerofnix/scratch-render-fonts/refs/heads/master/src/handlee-regular.ttf',
+            'Knewave': 'https://raw.githubusercontent.com/towerofnix/scratch-render-fonts/refs/heads/master/src/Knewave.ttf',
+            'Griffy': 'https://raw.githubusercontent.com/towerofnix/scratch-render-fonts/refs/heads/master/src/Griffy-Regular.ttf',
+            'Grand9K Pixel': 'https://raw.githubusercontent.com/towerofnix/scratch-render-fonts/refs/heads/master/src/Grand9K-Pixel.ttf'
+        };
+        this._fontCache = {}; // name -> { base64, format }
     }
 
     varName(name) {
@@ -579,31 +731,122 @@ class ProjectConverter {
         return script;
     }
 
+    async _readZipEntry(entry) {
+        if (!entry) return null;
+        if (typeof entry.async === 'function') {
+            try {
+                let out = await entry.async('uint8array');
+                if (out instanceof Uint8Array) return out;
+                if (out instanceof ArrayBuffer) return new Uint8Array(out);
+                if (typeof out === 'string') return new TextEncoder().encode(out);
+            } catch (e) {
+                try {
+                    let out2 = await entry.async('arraybuffer');
+                    if (out2 instanceof ArrayBuffer) return new Uint8Array(out2);
+                } catch (e2) {}
+                try {
+                    let s = await entry.async('string');
+                    if (typeof s === 'string') return new TextEncoder().encode(s);
+                } catch (e3) {}
+            }
+        }
+        if (typeof entry.asArrayBuffer === 'function') {
+            const ab = await entry.asArrayBuffer();
+            return new Uint8Array(ab);
+        }
+        if (typeof entry.asText === 'function') {
+            const s = await entry.asText();
+            return new TextEncoder().encode(s);
+        }
+        if (entry._data) {
+            if (entry._data instanceof Uint8Array) return entry._data;
+            if (entry._data instanceof ArrayBuffer) return new Uint8Array(entry._data);
+            if (typeof entry._data === 'string') return new TextEncoder().encode(entry._data);
+        }
+        if (entry instanceof Uint8Array) return entry;
+        if (entry instanceof ArrayBuffer) return new Uint8Array(entry);
+        if (typeof Blob !== 'undefined' && entry instanceof Blob) {
+            const ab = await entry.arrayBuffer();
+            return new Uint8Array(ab);
+        }
+        if (entry.data) {
+            if (entry.data instanceof Uint8Array) return entry.data;
+            if (entry.data instanceof ArrayBuffer) return new Uint8Array(entry.data);
+        }
+        return null;
+    }
+
     async addCostume(c, zipOut) {
         if (!this.costumeAssets[c.assetId]) {
             let ext = c.dataFormat;
             let url = `${ASSET_HOST}/${c.md5ext}/get/`;
-            
-            let finalData;
-            try {
-                const resp = await fetch(url);
-                if(!resp.ok) throw new Error("Fetch failed");
-                const data = await resp.arrayBuffer();
-                finalData = new Uint8Array(data);
 
-                if (ext === 'svg') {
-                    let str = new TextDecoder().decode(finalData);
-                    str = str.replace(/fill="undefined"/g, '');
-                    finalData = new TextEncoder().encode(str);
+            let finalData;
+            if (sourceZip) {
+                let entry = null;
+                if (typeof sourceZip.file === 'function') {
+                    entry = sourceZip.file(c.md5ext) || sourceZip.file('assets/' + c.md5ext);
                 }
-            } catch(e) {
-                console.warn(`Failed to download costume ${c.name}, using placeholder.`);
-                finalData = new TextEncoder().encode("<svg></svg>");
+                if (!entry && sourceZip.files) {
+                    for (const name in sourceZip.files) {
+                        if (!name) continue;
+                        if (name === c.md5ext || name.endsWith('/' + c.md5ext) || name.endsWith(c.md5ext)) { entry = sourceZip.file(name); break; }
+                    }
+                }
+                if (entry) {
+                    try {
+                        const arr = await this._readZipEntry(entry);
+                        if (!arr) throw new Error('Zip entry read returned null');
+                        finalData = arr;
+                        if (ext === 'svg') {
+                            let str = new TextDecoder().decode(finalData);
+                            str = str.replace(/fill="undefined"/g, '');
+                            finalData = new TextEncoder().encode(str);
+                        }
+                    } catch (e) {
+                        console.warn(`Failed to read costume ${c.name} from SB3 zip, using placeholder.`, e);
+                        finalData = new TextEncoder().encode(`<svg width="800" height="800" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M4 1C2.355 1 1 2.355 1 4v1h1V4c0-1.11.89-2 2-2h1V1zm2 0v1h4V1zm5 0v1h1c1.11 0 2 .89 2 2v1h1V4c0-1.645-1.355-3-3-3zM6 5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1M1 6v4h1V6zm13 0v4h1V6zM9.5 8l-2 2L6 9l-2 2v.5c0 .5.5.5.5.5h7s.473-.035.5-.5v-1zM1 11v1c0 1.645 1.355 3 3 3h1v-1H4c-1.11 0-2-.89-2-2v-1zm13 0v1c0 1.11-.89 2-2 2h-1v1h1c1.645 0 3-1.355 3-3v-1zm-8 3v1h4v-1zm0 0" fill="#2e3434" fill-opacity=".349"/></svg>`);
+                    }
+                } else {
+                    console.warn(`Costume ${c.name} not found in SB3 zip, using placeholder.`);
+                    finalData = new TextEncoder().encode(`<svg width="800" height="800" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M4 1C2.355 1 1 2.355 1 4v1h1V4c0-1.11.89-2 2-2h1V1zm2 0v1h4V1zm5 0v1h1c1.11 0 2 .89 2 2v1h1V4c0-1.645-1.355-3-3-3zM6 5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1M1 6v4h1V6zm13 0v4h1V6zM9.5 8l-2 2L6 9l-2 2v.5c0 .5.5.5.5.5h7s.473-.035.5-.5v-1zM1 11v1c0 1.645 1.355 3 3 3h1v-1H4c-1.11 0-2-.89-2-2v-1zm13 0v1c0 1.11-.89 2-2 2h-1v1h1c1.645 0 3-1.355 3-3v-1zm-8 3v1h4v-1zm0 0" fill="#2e3434" fill-opacity=".349"/></svg>`);
+                }
+            } else {
+                let finalDataLocal;
+                try {
+                    const resp = await fetch(url);
+                    if(!resp.ok) throw new Error("Fetch failed");
+                    const data = await resp.arrayBuffer();
+                    finalDataLocal = new Uint8Array(data);
+                    if (ext === 'svg') {
+                        let str = new TextDecoder().decode(finalDataLocal);
+                        str = str.replace(/fill="undefined"/g, '');
+                        finalDataLocal = new TextEncoder().encode(str);
+                    }
+                } catch(e) {
+                    console.warn(`Failed to download costume ${c.name}, using placeholder.`);
+                    finalDataLocal = new TextEncoder().encode(`<svg width="800" height="800" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M4 1C2.355 1 1 2.355 1 4v1h1V4c0-1.11.89-2 2-2h1V1zm2 0v1h4V1zm5 0v1h1c1.11 0 2 .89 2 2v1h1V4c0-1.645-1.355-3-3-3zM6 5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1M1 6v4h1V6zm13 0v4h1V6zM9.5 8l-2 2L6 9l-2 2v.5c0 .5.5.5.5.5h7s.473-.035.5-.5v-1zM1 11v1c0 1.645 1.355 3 3 3h1v-1H4c-1.11 0-2-.89-2-2v-1zm13 0v1c0 1.11-.89 2-2 2h-1v1h1c1.645 0 3-1.355 3-3v-1zm-8 3v1h4v-1zm0 0" fill="#2e3434" fill-opacity=".349"/></svg>`);
+                }
+                finalData = finalDataLocal;
             }
 
             let index = Object.keys(this.costumeAssets).length;
-            zipOut.file(`${index}.${ext}`, finalData);
-            this.costumeAssets[c.assetId] = [index, c.name, `${index}.${ext}`];
+            if (ext === 'svg') {
+                const svgText = new TextDecoder().decode(finalData);
+                zipOut.file(`${index}.svg`, svgText);
+                try {
+                    const pngBuffer = await this._rasterizeSvgToPng(svgText, c.bitmapResolution || 1);
+                    zipOut.file(`${index}.png`, pngBuffer);
+                    this.costumeAssets[c.assetId] = [index, c.name, `${index}.png`];
+                } catch (e) {
+                    console.warn(`SVG rasterize failed for ${c.name}, falling back to SVG:`, e);
+                    zipOut.file(`${index}.svg`, svgText);
+                    this.costumeAssets[c.assetId] = [index, c.name, `${index}.svg`];
+                }
+            } else {
+                zipOut.file(`${index}.${ext}`, finalData);
+                this.costumeAssets[c.assetId] = [index, c.name, `${index}.${ext}`];
+            }
         }
         let assetData = this.costumeAssets[c.assetId];
         this.costumes.push({
@@ -616,39 +859,298 @@ class ProjectConverter {
         });
     }
 
+    async _rasterizeSvgToPng(svgText, scale) {
+        const fontMap = {
+            'Sans Serif': 'Noto Sans',
+            'Serif': 'Source Serif Pro',
+            'Marker': 'Knewave',
+            'Handwriting': 'Handlee',
+            'Curly': 'Griffy',
+            'Pixel': 'Grand9K Pixel'
+        };
+
+        for (const [scratchFont, targetFont] of Object.entries(fontMap)) {
+            const escaped = scratchFont.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+            svgText = svgText.replace(new RegExp(`font-family="${escaped}"`, 'g'), `font-family="${targetFont}"`);
+            svgText = svgText.replace(new RegExp(`font-family='${escaped}'`, 'g'), `font-family='${targetFont}'`);
+            svgText = svgText.replace(new RegExp(`font-family:\\s*${escaped}`, 'g'), `font-family: ${targetFont}`);
+        }
+
+        try {
+            svgText = await this._embedFontsInSvg(svgText);
+        } catch (e) {
+            console.warn('Embedding fonts into SVG failed', e);
+        }
+
+        function parseSvgSize(svg) {
+            const wMatch = svg.match(/\bwidth\s*=\s*"([0-9.]+)(px)?"/i);
+            const hMatch = svg.match(/\bheight\s*=\s*"([0-9.]+)(px)?"/i);
+            const vbMatch = svg.match(/viewBox\s*=\s*"([0-9.\-]+)\s+([0-9.\-]+)\s+([0-9.\-]+)\s+([0-9.\-]+)"/i);
+            if (wMatch && hMatch) return {width: parseFloat(wMatch[1]), height: parseFloat(hMatch[1]), viewBox: vbMatch ? {x: parseFloat(vbMatch[1]), y: parseFloat(vbMatch[2]), width: parseFloat(vbMatch[3]), height: parseFloat(vbMatch[4])} : null};
+            if (vbMatch) return {width: parseFloat(vbMatch[3]), height: parseFloat(vbMatch[4]), viewBox: {x: parseFloat(vbMatch[1]), y: parseFloat(vbMatch[2]), width: parseFloat(vbMatch[3]), height: parseFloat(vbMatch[4])}};
+            return {width: 480, height: 360, viewBox: null};
+        }
+
+        const STAGE_W = 480 + 30;
+        const STAGE_H = 360 + 30;
+
+        const size = parseSvgSize(svgText);
+        const outW = Math.max(1, Math.round(size.width * scale));
+        const outH = Math.max(1, Math.round(size.height * scale));
+
+        if (size.width > STAGE_W || size.height > STAGE_H || outW > STAGE_W || outH > STAGE_H) {
+            throw new Error('SVG is past stage size');
+        }
+        if (size.viewBox) {
+            const vb = size.viewBox;
+            if (vb.x < 0 || vb.y < 0 || vb.x + vb.width > STAGE_W || vb.y + vb.height > STAGE_H) {
+                throw new Error('SVG view goes past stage borders');
+            }
+        }
+
+        if (document.fonts && document.fonts.ready) {
+            await document.fonts.ready;
+        }
+
+        const svgBlob = new Blob([svgText], {type: 'image/svg+xml;charset=utf-8'});
+        const url = URL.createObjectURL(svgBlob);
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+
+        await new Promise((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = (e) => {
+                console.error(e);
+                console.log("SVG:", svgText);
+                reject(new Error('SVG load failed'));
+            };
+            img.src = url;
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        try {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        } catch (e) {
+            URL.revokeObjectURL(url);
+            throw e;
+        }
+        URL.revokeObjectURL(url);
+
+        const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+        if (!blob) throw new Error('Canvas toBlob failed');
+        const ab = await blob.arrayBuffer();
+        return new Uint8Array(ab);
+    }
+
+    async _fetchFontAsBase64(name, url) {
+        if (this._fontCache[name]) return this._fontCache[name];
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('Font fetch failed');
+            const ab = await resp.arrayBuffer();
+            const extMatch = url.match(/\.([a-zA-Z0-9]+)($|[?#])/);
+            const ext = extMatch ? extMatch[1].toLowerCase() : 'ttf';
+            const mime = ext === 'otf' ? 'font/otf' : (ext === 'ttf' ? 'font/ttf' : 'application/octet-stream');
+            let binary = '';
+            const bytes = new Uint8Array(ab);
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+            }
+            const b64 = btoa(binary);
+            const fmt = ext === 'otf' ? 'opentype' : (ext === 'ttf' ? 'truetype' : 'woff');
+            const out = { base64: b64, mime, format: fmt };
+            this._fontCache[name] = out;
+            return out;
+        } catch (e) {
+            console.warn('Font load failed for', name, url, e);
+            this._fontCache[name] = null;
+            return null;
+        }
+    }
+
+    async _embedFontsInSvg(svgText) {
+        const used = new Set();
+        const re = /font-family\s*[:=]\s*['\"]?([^'";,)<>]+)['\"]?/gi;
+        let m;
+        while ((m = re.exec(svgText)) !== null) {
+            const name = m[1].trim();
+            if (this._fontFiles[name]) used.add(name);
+        }
+        if (used.size === 0) return svgText;
+
+        const rules = [];
+        for (const name of used) {
+            const url = this._fontFiles[name];
+            if (!url) continue;
+            const f = await this._fetchFontAsBase64(name, url);
+            if (!f) continue;
+            rules.push(`@font-face { font-family: '${name}'; src: url('data:${f.mime};base64,${f.base64}') format('${f.format}'); font-weight: normal; font-style: normal; }`);
+        }
+        if (rules.length === 0) return svgText;
+
+        const style = `<style type="text/css"><![CDATA[\n${rules.join('\n')}\n]]></style>`;
+        const svgTagStart = svgText.search(/<svg[\s>]/i);
+        if (svgTagStart === -1) return style + svgText;
+        const tagEnd = svgText.indexOf('>', svgTagStart);
+        if (tagEnd === -1) return style + svgText;
+        return svgText.slice(0, tagEnd + 1) + style + svgText.slice(tagEnd + 1);
+    }
+
     async addSound(s, zipOut) {
         if (!this.soundAssets[s.assetId]) {
             let ext = s.dataFormat;
             let url = `${ASSET_HOST}/${s.md5ext}/get/`;
-            
             let data;
-            try {
-                const resp = await fetch(url);
-                if(!resp.ok) throw new Error("Fetch failed");
-                data = await resp.arrayBuffer();
-            } catch(e) {
-                console.warn(`Failed to download sound ${s.name}`);
-                data = new Uint8Array(0);
+            let rate = s.rate;
+            let sampleCount = s.sampleCount;
+
+            if (sourceZip) {
+                let entry = null;
+                if (typeof sourceZip.file === 'function') entry = sourceZip.file(s.md5ext) || sourceZip.file('assets/' + s.md5ext);
+                if (!entry && sourceZip.files) {
+                    for (const name in sourceZip.files) {
+                        if (!name) continue;
+                        if (name === s.md5ext || name.endsWith('/' + s.md5ext) || name.endsWith(s.md5ext)) { entry = sourceZip.file(name); break; }
+                    }
+                }
+                if (entry) {
+                    try {
+                        const arr = await this._readZipEntry(entry);
+                        if (!arr) throw new Error('Zip entry read returned null');
+                        const ab = arr instanceof Uint8Array ? arr.buffer : arr;
+                        data = ab;
+
+                        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                        let audioBuffer = await audioCtx.decodeAudioData(ab.slice(0));
+                        rate = audioBuffer.sampleRate;
+                        sampleCount = audioBuffer.length;
+
+                        if (rate > 48000) {
+                            const offlineCtx = new OfflineAudioContext(audioBuffer.numberOfChannels, audioBuffer.duration * 48000, 48000);
+                            const source = offlineCtx.createBufferSource();
+                            source.buffer = audioBuffer;
+                            source.connect(offlineCtx.destination);
+                            source.start();
+                            audioBuffer = await offlineCtx.startRendering();
+                            rate = 48000;
+                            sampleCount = audioBuffer.length;
+                        }
+
+                        if (ext === 'mp3') {
+                            data = this.bufferToWav(audioBuffer);
+                            ext = 'wav';
+                        }
+                    } catch (e) {
+                        console.warn('Failed to decode sound from SB3 zip', e);
+                        data = new Uint8Array(0);
+                        rate = rate || 22050;
+                        sampleCount = sampleCount || 0;
+                    }
+                } else {
+                    console.warn(`Sound ${s.name} not found in SB3 zip, using empty placeholder.`);
+                    data = new Uint8Array(0);
+                    rate = rate || 22050;
+                    sampleCount = sampleCount || 0;
+                }
+            } else {
+                try {
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error();
+                    data = await resp.arrayBuffer();
+
+                    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    let audioBuffer = await audioCtx.decodeAudioData(data.slice(0));
+
+                    rate = audioBuffer.sampleRate;
+                    sampleCount = audioBuffer.length;
+
+                    if (rate > 48000) {
+                        const offlineCtx = new OfflineAudioContext(audioBuffer.numberOfChannels, audioBuffer.duration * 48000, 48000);
+                        const source = offlineCtx.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(offlineCtx.destination);
+                        source.start();
+                        audioBuffer = await offlineCtx.startRendering();
+                        rate = 48000;
+                        sampleCount = audioBuffer.length;
+                    }
+
+                    if (ext === 'mp3') {
+                        data = this.bufferToWav(audioBuffer);
+                        ext = 'wav';
+                    }
+                } catch (e) {
+                    console.warn(e);
+                    data = new Uint8Array(0);
+                    rate = rate || 22050;
+                    sampleCount = sampleCount || 0;
+                }
             }
 
+            if (rate > 48000) rate = 48000;
+
             let index = Object.keys(this.soundAssets).length;
-            let outName = `${index}.${ext === 'mp3' ? 'wav' : ext}`; 
+            let outName = `${index}.${ext}`;
 
             zipOut.file(outName, data);
-            
-            let rate = s.rate || 22050;
-            let sampleCount = s.sampleCount || 0;
+
             this.soundAssets[s.assetId] = [index, s.name, sampleCount, rate, outName];
         }
         let assetData = this.soundAssets[s.assetId];
         this.sounds.push({
-            soundName: s.name,
+            soundName: assetData[1],
             soundID: assetData[0],
             md5: assetData[4],
             sampleCount: assetData[2],
             rate: assetData[3],
             format: ''
         });
+    }
+
+    bufferToWav(buffer) {
+        let numOfChan = buffer.numberOfChannels,
+            length = buffer.length * numOfChan * 2 + 44,
+            bufferArr = new ArrayBuffer(length),
+            view = new DataView(bufferArr),
+            channels = [], i, sample,
+            offset = 0,
+            pos = 0;
+
+        const setUint16 = (d) => { view.setUint16(pos, d, true); pos += 2; };
+        const setUint32 = (d) => { view.setUint32(pos, d, true); pos += 4; };
+
+        setUint32(0x46464952);
+        setUint32(length - 8);
+        setUint32(0x45564157);
+        setUint32(0x20746d66);
+        setUint32(16);
+        setUint16(1);
+        setUint16(numOfChan);
+        setUint32(buffer.sampleRate);
+        setUint32(buffer.sampleRate * 2 * numOfChan);
+        setUint16(numOfChan * 2);
+        setUint16(16);
+        setUint32(0x61746164);
+        setUint32(length - pos - 4);
+
+        for (i = 0; i < numOfChan; i++) channels.push(buffer.getChannelData(i));
+
+        while (pos < length) {
+            for (i = 0; i < numOfChan; i++) {
+                sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF);
+                view.setInt16(pos, sample, true);
+                pos += 2;
+            }
+            offset++;
+        }
+
+        return bufferArr;
     }
 
     async convertTarget(target, zipOut, progressCallback) {
@@ -685,6 +1187,19 @@ class ProjectConverter {
                 isPersistent: false,
                 x: 0, y: 0, width: 100, height: 200, visible: false 
             });
+        }
+        if (this.compat && !target.isStage) {
+            const spriteCostumeNames = (target.costumes || []).map(c => c.name || '');
+            const spriteListName = this.varName('SpriteCostumes');
+            const alreadyHas = lists.some(l => l.listName === spriteListName);
+            if (!alreadyHas) {
+                lists.push({
+                    listName: spriteListName,
+                    contents: spriteCostumeNames.map(x => this.specialNum(x)),
+                    isPersistent: false,
+                    x: 0, y: 0, width: 100, height: 200, visible: false
+                });
+            }
         }
 
         let scripts = [];
