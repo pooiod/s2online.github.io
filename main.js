@@ -1,10 +1,23 @@
 var swf = document.querySelector('#scratch embed');
 
 window.gotZipBase64 = function(content) {
-    swf.ASopenProjectFromData(content);
-    setTimeout(() => {
-        $('#downloader').animate({height: 0}, 1000);
-    }, 100);
+    let tries = 0;
+    const interval = setInterval(() => {
+        swf = document.querySelector('#scratch embed');
+        if (swf && swf.ASopenProjectFromData) {
+            clearInterval(interval);
+            swf.ASopenProjectFromData(content);
+            setTimeout(() => {
+                $('#downloader').animate({height: 0}, 1000);
+                throw new Error("Unable to run ASopenProjectFromData from swf");
+            }, 100);
+        } else {
+            tries++;
+            if (tries >= 40) {
+                clearInterval(interval);
+            }
+        }
+    }, 1000);
 };
 
 window.JSdownloadSB2 = function(data, filename) {
