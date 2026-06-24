@@ -9,12 +9,12 @@ window.gotZipBase64 = function(content) {
             swf.ASopenProjectFromData(content);
             setTimeout(() => {
                 $('#downloader').animate({height: 0}, 1000);
-                throw new Error("Unable to run ASopenProjectFromData from swf");
             }, 100);
         } else {
             tries++;
             if (tries >= 40) {
                 clearInterval(interval);
+                throw new Error("Unable to run ASopenProjectFromData from swf");
             }
         }
     }, 1000);
