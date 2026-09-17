@@ -11,6 +11,10 @@
         debug: 4
     };
 
+    const PROJECT_ID_REPLACEMENTS = {
+        "1298757456": "https://pooiod7.pages.dev/s2/GeometryDash.sb2"
+    };
+
     class ProjectDownloader {
         static bufferToBase64(buffer) {
             const bytes = new Uint8Array(buffer);
@@ -127,6 +131,8 @@
         }
 
         static async downloadProject(projectId, progressCallback = () => {}) {
+            projectId = PROJECT_ID_REPLACEMENTS[projectId] || projectId;
+
             let projectData = null;
             let sourceZip = null;
             let type = 'unknown';
@@ -868,11 +874,11 @@
                     listName: this.c.varName(l[0]),
                     contents: l[1].map(x => this.c.specialNum(x)),
                     isPersistent: false,
-                    x: monitor ? monitor.x : 0, 
-                    y: monitor ? monitor.y : 0, 
-                    width: monitor ? monitor.width : 100, 
-                    height: monitor ? monitor.height : 200, 
-                    visible: monitor ? monitor.visible : false 
+                    x: (monitor && monitor.x !== undefined) ? Math.round(monitor.x) : 0,
+                    y: (monitor && monitor.y !== undefined) ? Math.round(monitor.y) : 0,
+                    width: (monitor && monitor.width) ? Math.round(monitor.width) : 100,
+                    height: (monitor && monitor.height) ? Math.round(monitor.height) : 200,
+                    visible: monitor ? monitor.visible : false
                 });
             }
             if (this.c.compat && !target.isStage) {
@@ -1427,8 +1433,8 @@
     }
 
     window.SB3ToSB2 = {
-        _level: 1,
-        _logHandler: null,
+        _level: 2,
+        _logHandler: console.log,
         projectSource: "",
 
         logginglevel(lvl) {
@@ -1536,8 +1542,8 @@
                             sliderMin: m.sliderMin || 0,
                             sliderMax: m.sliderMax || 100,
                             isDiscrete: m.isDiscrete || false,
-                            x: m.x || 0,
-                            y: m.y || 0,
+                            x: m.x !== undefined ? Math.round(m.x) : 0,
+                            y: m.y !== undefined ? Math.round(m.y) : 0,
                             visible: !!m.visible
                         });
                     }
